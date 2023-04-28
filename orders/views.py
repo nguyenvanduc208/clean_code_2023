@@ -1,78 +1,73 @@
-from django.utils import timezone
-from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from .models import Product, Order, OrderItem
-from django.contrib.auth.models import User
-from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
-from .models import Order, OrderItem
-from .serializers import OrderSerializer, OrderItemSerializer
-from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.views import APIView
+from django.shortcuts import get_object_or_404
 
-from orders.models import Order, OrderItem
-from orders.serializers import OrderSerializer, OrderItemSerializer
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def order_product(request, pk):
-    user = request.user
-    product = Product.objects.get(pk=pk)
+from orders.models import Product, Order, OrderItem
+from orders.serializers import OrderSerializer
 
-    if request.method == 'POST':
-        order_qs = Order.objects.filter(user=user, ordered=False)
+
+class OrderProduct(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        product = Product.objects.get(id=request.data["product_id"])
+
+        order_qs = Order.objects.filter(user=user, complete=False)
         if order_qs.exists():
             order = order_qs[0]
-            if order.products.filter(product__pk=product.pk).exists():
-                order_item = OrderItem.objects.filter(product=product, user=user, ordered=False)[0]
+            if order.items.filter(id=product.pk).exists():
+                order_item = OrderItem.objects.filter(product=product, order=order)[0]
                 order_item.quantity += 1
                 order_item.save()
                 return Response(status=status.HTTP_200_OK)
             else:
-                order_item = OrderItem.objects.create(product=product, user=user)
-                order.products.add(order_item)
+                order_item = OrderItem.objects.create(product=product, order=order)
                 return Response(status=status.HTTP_200_OK)
         else:
-            ordered_date = timezone.now()
-            order = Order.objects.create(user=user, ordered_date=ordered_date)
-            order_item = OrderItem.objects.create(product=product, user=user, ordered=False)
-            order.products.add(order_item)
+            order = Order.objects.create(user=user)
+            order_item = OrderItem.objects.create(product=product, order=order)
             return Response(status=status.HTTP_200_OK)
-    return Response(status=status.HTTP_400_BAD_REQUEST)
+        
 
+class OrderDetail(APIView):
+    permission_classes = [IsAuthenticated]
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_order_detail(request, order_id):
-    try:
-        order = Order.objects.get(id=order_id, user=request.user)
-    except Order.DoesNotExist:
-        return Response({'error': 'Order not found'}, status=status.HTTP_404_NOT_FOUND)
+    def get_object(self, pk):
+        return get_object_or_404(Order, id=pk)
 
-    order_items = OrderItem.objects.filter(order=order)
-    serializer = OrderItemSerializer(order_items, many=True)
+    def get(self, request, pk):
+        order = self.get_object(pk)
 
-    order_serializer = OrderSerializer(order)
-    order_data = order_serializer.data
+        if order.user != request.user:
+            return Response({"error": "You cannot view other's orders"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        serializer = OrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    def put(self, request, pk):
+        order = self.get_object(pk)
 
-    order_data['order_items'] = serializer.data
-
-    return Response(order_data, status=status.HTTP_200_OK)
-
-
-@api_view(['PUT'])
-def update_order(request, order_id):
-    try:
-        order = Order.objects.get(id=order_id)
-    except Order.DoesNotExist:
-        return Response({'message': 'Order does not exist'}, status=status.HTTP_404_NOT_FOUND)
-
-    serializer = OrderSerializer(order, data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(serializer.data)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        if order.user != request.user:
+            return Response({"error": "You cannot view other's orders"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        items = request.data.get("ordered_items")
+        for item in items:
+            product_id = item.get("product")
+            inv_item = OrderItem.objects.get(product_id=product_id, order_id=order.id)
+            inv_item.quantity = item.get("quantity")
+            inv_item.save()
+        
+        serializer = OrderSerializer(order, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
